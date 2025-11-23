@@ -1,0 +1,16 @@
+version = 1
+
+[[annotations]]
+path = [
+    ".gitattributes",
+    ".github/**",
+    ".gitignore",
+    "*.md",
+    "REUSE.toml",
+    "build.zig",
+    "build.zig.zon",
+    "package/**",
+    "src/**",
+]
+SPDX-FileCopyrightText = "Nikolay Govorov"
+SPDX-License-Identifier = "AGPL-3.0-or-later"

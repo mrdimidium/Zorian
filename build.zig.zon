@@ -1,0 +1,14 @@
+.{
+    .name = .zorian,
+    .version = "0.1.0",
+    .fingerprint = 0x50c5e19966bc3e6c, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.15.1",
+    .dependencies = .{},
+    .paths = .{
+        "src/",
+        "LICENSES/",
+        "README.md",
+        "build.zig",
+        "build.zig.zon",
+    },
+}
