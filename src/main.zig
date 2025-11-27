@@ -1,9 +1,12 @@
 const std = @import("std");
 const posix = std.posix;
 const assert = std.debug.assert;
+const Allocator = std.mem.Allocator;
 
 const Cli = @import("cli.zig");
 const Config = @import("config.zig");
+const SigHandler = @import("sighandler.zig");
+
 const stdx = @import("stdx.zig");
 const network = @import("network.zig");
 const backendZig = @import("backend/zig.zig");
@@ -38,6 +41,9 @@ pub fn main() !void {
     defer _ = arena_instance.deinit();
     const arena = arena_instance.allocator();
 
+    var sighandler = SigHandler{ .arena = arena };
+    try sighandler.install();
+
     // Load configuration
     var args = try std.process.argsWithAllocator(arena);
     defer args.deinit();
@@ -65,6 +71,15 @@ pub fn main() !void {
 
     try posix.bind(server_fd, @ptrCast(@alignCast(&addr)), addr_len);
     try posix.listen(server_fd, Config.max_pending_connections);
+
+    const shutdown = struct {
+        fn func(fd: posix.socket_t) void {
+            posix.shutdown(fd, .recv) catch |err| {
+                std.log.warn("Failed to terminate socket: {}", .{err});
+            };
+        }
+    }.func;
+    try sighandler.on(shutdown, .{server_fd});
 
     while (true) {
         const client_fd = posix.accept(server_fd, @ptrCast(@alignCast(&addr)), &addr_len, 0) catch |err| {
