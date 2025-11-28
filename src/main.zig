@@ -60,7 +60,7 @@ pub fn main() !void {
     };
 
     // Start server
-    try network.SocketTls.global_init();
+    try network.Tls.globalInit();
 
     const server_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
     defer posix.close(server_fd);
@@ -153,8 +153,9 @@ pub fn main() !void {
 pub fn download(uri: std.Uri, file: std.fs.File) !void {
     assert(std.mem.eql(u8, "https", uri.scheme));
 
-    var pathbuf: [64:0]u8 = undefined;
-    var hostbuf: [64:0]u8 = undefined;
+    var pathbuf = std.mem.zeroes([64:0]u8);
+    var hostbuf = std.mem.zeroes([64:0]u8);
+    var portbuf = std.mem.zeroes([8:0]u8);
 
     const path = blk: {
         var writer = std.Io.Writer.fixed(&pathbuf);
@@ -166,8 +167,12 @@ pub fn download(uri: std.Uri, file: std.fs.File) !void {
         try uri.host.?.formatHost(&writer);
         break :blk writer.buffered();
     };
+    {
+        var writer = std.Io.Writer.fixed(&portbuf);
+        try writer.print("{d}", .{uri.port orelse 443});
+    }
 
-    var socket: network.SocketTls = try .connect(host, uri.port orelse 443);
+    var socket: network.Tls = try .connect(&hostbuf, &portbuf);
     defer socket.close();
 
     { // send request

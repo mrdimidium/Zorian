@@ -4,6 +4,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const mbedtls = b.dependency("mbedtls", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const manifest = Manifest.init(b);
     defer manifest.deinit(b.allocator);
 
@@ -20,10 +25,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    exe.root_module.linkSystemLibrary("ssl", .{});
-    exe.root_module.linkSystemLibrary("crypto", .{});
-
     exe.root_module.addOptions("config", options);
+    exe.root_module.linkLibrary(mbedtls.artifact("mbedtls"));
 
     b.installArtifact(exe);
 

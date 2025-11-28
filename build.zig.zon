@@ -3,7 +3,12 @@
     .version = "0.1.0",
     .fingerprint = 0x50c5e19966bc3e6c, // Changing this has security and trust implications.
     .minimum_zig_version = "0.15.1",
-    .dependencies = .{},
+    .dependencies = .{
+        .mbedtls = .{
+            .url = "https://github.com/zig-devel/mbedtls/archive/refs/tags/3.6.5-0.tar.gz",
+            .hash = "mbedtls-3.6.5-0-DmmJzvdDAADGgugvv4S0AVFI_Hcdh4I7EVeYkawLb43S",
+        },
+    },
     .paths = .{
         "src/",
         "LICENSES/",

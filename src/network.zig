@@ -6,10 +6,14 @@ pub const Status = std.http.Status;
 pub const Version = std.http.Version;
 pub const Connection = std.http.Connection;
 
-const openssl = @cImport({
-    @cInclude("openssl/bio.h");
-    @cInclude("openssl/ssl.h");
-    @cInclude("openssl/err.h");
+const mbedtls = @cImport({
+    @cInclude("mbedtls/ssl.h");
+    @cInclude("mbedtls/entropy.h");
+    @cInclude("mbedtls/net_sockets.h");
+
+    @cInclude("mbedtls/debug.h");
+    @cInclude("mbedtls/error.h");
+    @cInclude("mbedtls/ctr_drbg.h");
 });
 
 /// HTTP defines a set of request methods to indicate the purpose
@@ -83,88 +87,142 @@ pub const Protocol = enum {
     }
 };
 
-pub const SocketTls = struct {
-    bio: *openssl.BIO,
+fn mbedtlsPerror(func: []const u8, rc: c_int) void {
+    var buffer: [128:0]u8 = undefined;
+    mbedtls.mbedtls_strerror(rc, &buffer[0], @intCast(buffer.len));
 
-    ctx: *openssl.SSL_CTX,
+    std.log.err("{s} returned: {s}", .{ func, buffer[0..] });
+}
+
+pub const Tls = struct {
+    const pers: [:0]const u8 = "ssl_client1";
+
+    var ssl: mbedtls.mbedtls_ssl_context = undefined;
+    var conf: mbedtls.mbedtls_ssl_config = undefined;
+    var cacert: mbedtls.mbedtls_x509_crt = undefined;
+    var net_ctx: mbedtls.mbedtls_net_context = undefined;
+    var entropy: mbedtls.mbedtls_entropy_context = undefined;
+    var ctr_drbg: mbedtls.mbedtls_ctr_drbg_context = undefined;
 
     const ConnectError = error{
         TlsError,
         InvalidUri,
     };
 
-    pub fn global_init() !void {
-        _ = openssl.OPENSSL_init_crypto(openssl.OPENSSL_INIT_ADD_ALL_CIPHERS | openssl.OPENSSL_INIT_ADD_ALL_DIGESTS, null);
-        _ = openssl.OPENSSL_init_ssl(openssl.OPENSSL_INIT_LOAD_SSL_STRINGS | openssl.OPENSSL_INIT_LOAD_CRYPTO_STRINGS, null);
+    pub fn globalInit() !void {
+        mbedtls.mbedtls_net_init(&net_ctx);
+
+        mbedtls.mbedtls_ssl_init(&ssl);
+        mbedtls.mbedtls_ssl_config_init(&conf);
+
+        mbedtls.mbedtls_x509_crt_init(&cacert);
+        mbedtls.mbedtls_ctr_drbg_init(&ctr_drbg);
+        mbedtls.mbedtls_entropy_init(&entropy);
+
+        const rc1 = mbedtls.mbedtls_ctr_drbg_seed(
+            &ctr_drbg,
+            mbedtls.mbedtls_entropy_func,
+            &entropy,
+            pers.ptr,
+            pers.len,
+        );
+        if (rc1 != 0) {
+            mbedtlsPerror("mbedtls_ctr_drbg_seed", rc1);
+            return error.TlsError;
+        }
     }
 
-    pub fn connect(host: []const u8, port: u16) !SocketTls {
-        var sni: [64:0]u8 = undefined;
-        _ = try std.fmt.bufPrintZ(&sni, "{s}:{d}", .{ host, port });
-
-        var socket = SocketTls{ .bio = undefined, .ctx = undefined };
-
-        socket.ctx = openssl.SSL_CTX_new(openssl.TLS_client_method()) orelse
+    pub fn connect(host: [:0]const u8, port: [:0]const u8) !Tls {
+        const rc1 = mbedtls.mbedtls_net_connect(
+            &net_ctx,
+            host.ptr,
+            port.ptr,
+            mbedtls.MBEDTLS_NET_PROTO_TCP,
+        );
+        if (rc1 != 0) {
+            mbedtlsPerror("mbedtls_net_connect", rc1);
             return error.TlsError;
+        }
 
-        socket.bio = openssl.BIO_new_ssl_connect(socket.ctx) orelse
+        const rc2 = mbedtls.mbedtls_ssl_config_defaults(
+            &conf,
+            mbedtls.MBEDTLS_SSL_IS_CLIENT,
+            mbedtls.MBEDTLS_SSL_TRANSPORT_STREAM,
+            mbedtls.MBEDTLS_SSL_PRESET_DEFAULT,
+        );
+        if (rc2 != 0) {
+            mbedtlsPerror("mbedtls_ssl_config_defaults", rc2);
             return error.TlsError;
+        }
 
-        {
-            var ssl: ?*openssl.SSL = null;
-            _ = openssl.BIO_get_ssl(socket.bio, &ssl);
-            if (ssl == null) {
+        mbedtls.mbedtls_ssl_conf_authmode(&conf, mbedtls.MBEDTLS_SSL_VERIFY_OPTIONAL);
+        mbedtls.mbedtls_ssl_conf_ca_chain(&conf, &cacert, null);
+        mbedtls.mbedtls_ssl_conf_rng(&conf, mbedtls.mbedtls_ctr_drbg_random, &ctr_drbg);
+
+        const rc3 = mbedtls.mbedtls_ssl_setup(&ssl, &conf);
+        if (rc3 != 0) {
+            mbedtlsPerror("mbedtls_ssl_setup", rc3);
+            return error.TlsError;
+        }
+
+        const rc4 = mbedtls.mbedtls_ssl_set_hostname(&ssl, host.ptr);
+        if (rc4 != 0) {
+            mbedtlsPerror("mbedtls_ssl_set_hostname", rc4);
+            return error.TlsError;
+        }
+
+        mbedtls.mbedtls_ssl_set_bio(&ssl, &net_ctx, mbedtls.mbedtls_net_send, mbedtls.mbedtls_net_recv, null);
+
+        while (true) {
+            const rc5 = mbedtls.mbedtls_ssl_handshake(&ssl);
+            if (rc5 == 0) break;
+            if (rc5 != mbedtls.MBEDTLS_ERR_SSL_WANT_READ and rc5 != mbedtls.MBEDTLS_ERR_SSL_WANT_WRITE) {
+                mbedtlsPerror("mbedtls_ssl_handshake ", rc5);
                 return error.TlsError;
             }
-
-            _ = openssl.SSL_set_mode(ssl, openssl.SSL_MODE_AUTO_RETRY);
         }
 
-        _ = openssl.BIO_ctrl(socket.bio, openssl.BIO_C_SET_CONNECT, 0, &sni[0]);
-        if (openssl.BIO_do_connect(socket.bio) <= 0) {
-            return error.TlsError;
-        }
-
-        if (openssl.BIO_do_handshake(socket.bio) <= 0) {
-            return error.TlsError;
-        }
-
+        const socket = Tls{};
         return socket;
     }
 
-    pub fn close(s: *SocketTls) void {
-        openssl.BIO_free_all(s.bio);
-        openssl.SSL_CTX_free(s.ctx);
+    pub fn close(s: *Tls) void {
+        _ = s;
+
+        mbedtls.mbedtls_net_free(&net_ctx);
+        mbedtls.mbedtls_ssl_free(&ssl);
+        mbedtls.mbedtls_ssl_config_free(&conf);
+        mbedtls.mbedtls_ctr_drbg_free(&ctr_drbg);
+        mbedtls.mbedtls_entropy_free(&entropy);
     }
 
-    pub fn read(s: *SocketTls, buf: []u8) posix.ReadError!usize {
-        const rc = openssl.BIO_read(s.bio, &buf[0], @intCast(buf.len));
+    pub fn read(s: *Tls, buf: []u8) posix.ReadError!usize {
+        _ = s;
+
+        const rc = mbedtls.mbedtls_ssl_read(&ssl, &buf[0], @intCast(buf.len));
         if (rc >= 0) { // success, return readed bytes
             return @intCast(rc);
         }
 
-        if (rc == -1) {
-            const err = openssl.ERR_get_error();
-            std.log.err("OpenSSL error: {s}", .{openssl.ERR_reason_error_string(err)});
-            return error.Unexpected;
+        if (rc == mbedtls.MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
+            // closed the connection first. We're ok with that
+            return 0;
         }
 
-        unreachable;
+        mbedtlsPerror("mbedtls_ssl_read", rc);
+        return error.Unexpected;
     }
 
-    pub fn write(s: *SocketTls, buf: []const u8) posix.WriteError!usize {
-        const rc = openssl.BIO_write(s.bio, buf.ptr, @intCast(buf.len));
-        if (rc >= 0) { // success, return readed bytes
+    pub fn write(s: *Tls, buf: []const u8) posix.WriteError!usize {
+        _ = s;
+
+        const rc = mbedtls.mbedtls_ssl_write(&ssl, buf.ptr, @intCast(buf.len));
+        if (rc >= 0) { // success, return writed bytes
             return @intCast(rc);
         }
 
-        if (rc == -1) {
-            const err = openssl.ERR_get_error();
-            std.log.err("OpenSSL error: {s}", .{openssl.ERR_reason_error_string(err)});
-            return error.Unexpected;
-        }
-
-        unreachable;
+        mbedtlsPerror("mbedtls_ssl_write", rc);
+        return error.Unexpected;
     }
 };
 
