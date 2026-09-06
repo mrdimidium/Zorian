@@ -63,12 +63,11 @@ eval "$(mise activate bash)"
 mise run signoff
 mise run licenses
 
-# Lint, tests, and coverage
+# Lint, tests, and coverage (cargo llvm-cov runs the test suite).
 cargo fmt --all --check
 shellcheck Mirumfile deploy/scripts/*.sh deploy/*.initd tests/*.sh tests/smoke/*.sh
 cargo clippy --workspace --all-targets --all-features --release --locked -- -D warnings
 
-cargo test --all-features --release --locked
 tests/chart.sh
 mkdir -p target/coverage
 cargo llvm-cov --all-features --workspace --lcov \
