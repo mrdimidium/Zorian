@@ -1,4 +1,4 @@
-#!/usr/bin/sh
+#!/usr/bin/env bash
 # SPDX-FileCopyrightText: 2026 Nikolay Govorov
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -43,6 +43,10 @@ fi
 
 MISE_IGNORED_CONFIG_PATHS=${MISE_IGNORED_CONFIG_PATHS:-${XDG_CONFIG_HOME:-$HOME/.config}/mise/config.toml}
 export MISE_IGNORED_CONFIG_PATHS
+if [ -z "${MISE_GITHUB_TOKEN:-}" ] && [ -n "${GH_TOKEN:-}" ]; then
+    MISE_GITHUB_TOKEN=$GH_TOKEN
+    export MISE_GITHUB_TOKEN
+fi
 
 if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
     if [ -n "${GITHUB_REF:-}" ]; then
@@ -52,47 +56,60 @@ if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
     fi
 fi
 
+mise bootstrap --locked --yes --update
+eval "$(mise activate bash)"
+
 # Legal checks
 mise run signoff
 mise run licenses
 
 # Lint, tests, and coverage
-mise bootstrap --locked --yes --update
-mise exec -- cargo fmt --all --check
-mise exec -- shellcheck Mirumfile pkg/scripts/*.sh tests/smoke/*.sh
-mise exec -- cargo clippy --workspace --all-targets --all-features --release --locked -- -D warnings
+cargo fmt --all --check
+shellcheck Mirumfile deploy/scripts/*.sh deploy/*.initd tests/*.sh tests/smoke/*.sh
+cargo clippy --workspace --all-targets --all-features --release --locked -- -D warnings
 
-mise exec -- cargo test --all-features --release --locked
+cargo test --all-features --release --locked
+tests/chart.sh
 mkdir -p target/coverage
-mise exec -- cargo llvm-cov --all-features --workspace --lcov \
+cargo llvm-cov --all-features --workspace --lcov \
     --output-path target/coverage/lcov.info
 
-base_version=$(mise exec -- cargo metadata --no-deps --format-version 1 |
-    mise exec -- jq -r '.packages[] | select(.name == "tesor") | .version')
+base_version=$(cargo metadata --no-deps --format-version 1 |
+    jq -r '.packages[] | select(.name == "tesor") | .version')
 [ -n "$base_version" ] || {
     echo "cannot determine tesor version" >&2
     exit 1
 }
 revision=${GITHUB_SHA:-$(git rev-parse HEAD)}
 timestamp=$(git log -1 --format=%ct)
+SOURCE_DATE_EPOCH=$timestamp
+export SOURCE_DATE_EPOCH
 
 case ${GITHUB_REF:-} in
     refs/tags/v*)
-        tag_version=${GITHUB_REF#refs/tags/v}
-        [ "$tag_version" = "$base_version" ] || {
-            echo "tag version $tag_version does not match Cargo.toml version $base_version" >&2
+        version=${GITHUB_REF#refs/tags/v}
+        [ "$version" = "$base_version" ] || {
+            echo "tag version $version does not match Cargo.toml version $base_version" >&2
             exit 1
         }
-        package_version=$base_version
-        artifact_version=$base_version
+        package_version=$version
+        channel=stable
+        release_tag="v$version"
+        release_name=$version
         ;;
     refs/heads/main)
+        version="$base_version-nightly.$timestamp"
         package_version="$base_version~nightly.$timestamp"
-        artifact_version="$base_version-nightly.$timestamp"
+        channel=nightly
+        release_tag=nightly
+        release_name=nightly
         ;;
     *)
-        package_version="$base_version~nightly.$timestamp"
-        artifact_version="$base_version-pr.${GITHUB_RUN_NUMBER:-local}"
+        version="$base_version-pr.${GITHUB_RUN_NUMBER:-local}"
+        package_version="$base_version~pr.${GITHUB_RUN_NUMBER:-local}"
+        channel=
+        release_tag=
+        release_name=
         ;;
 esac
 
@@ -104,17 +121,58 @@ if [ "${GITHUB_EVENT_NAME:-}" = push ]; then
             exit 1
             ;;
     esac
+
+    : "${GH_TOKEN:?GH_TOKEN is required for publishing}"
+    : "${GITHUB_ACTOR:?GITHUB_ACTOR is required for publishing}"
+    : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required for publishing}"
+    : "${GPG_KEY_ID:?GPG_KEY_ID is required for publishing}"
+    : "${GPG_PRIVATE_KEY:?GPG_PRIVATE_KEY is required for publishing}"
+    : "${GPG_PASSPHRASE:?GPG_PASSPHRASE is required for publishing}"
+    : "${APK_PRIVATE_KEY:?APK_PRIVATE_KEY is required for publishing}"
+    : "${PACKAGE_KEY_VERSION:?PACKAGE_KEY_VERSION is required for publishing}"
+    : "${S3_BUCKET:?S3_BUCKET is required for publishing}"
+    : "${S3_ENDPOINT:?S3_ENDPOINT is required for publishing}"
+    : "${S3_PUBLIC_URL:?S3_PUBLIC_URL is required for publishing}"
+    : "${S3_ACCESS_KEY_ID:?S3_ACCESS_KEY_ID is required for publishing}"
+    : "${S3_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY is required for publishing}"
+    case $PACKAGE_KEY_VERSION in
+        [0-9][0-9][0-9][0-9]) ;;
+        *) echo "invalid PACKAGE_KEY_VERSION: $PACKAGE_KEY_VERSION" >&2; exit 1 ;;
+    esac
 fi
 
 # Packages and architecture-specific container inputs
 rm -rf dist .container
-for architecture in amd64 arm64; do
+if [ "${GITHUB_EVENT_NAME:-}" = push ]; then
+    # Freeze OpenPGP signature times so a retry produces identical packages.
+    real_gpg=$(command -v gpg)
+    rpm_config_dir=$(rpm --eval '%{_rpmconfigdir}')
+    [ -d "$rpm_config_dir" ] || {
+        echo "RPM configuration directory not found: $rpm_config_dir" >&2
+        exit 1
+    }
+    install -d -m 0755 .container/repro-bin .container/rpm-config
+    cat >.container/repro-bin/gpg <<'EOF'
+#!/bin/sh
+exec "$REAL_GPG" --faked-system-time "${SOURCE_DATE_EPOCH}!" "$@"
+EOF
+    chmod 0755 .container/repro-bin/gpg
+    cp -a "$rpm_config_dir/." .container/rpm-config/
+    printf '\n%%_gpg_sign_cmd_extra_args --faked-system-time %s!\n' \
+        "$SOURCE_DATE_EPOCH" >>.container/rpm-config/macros
+    REAL_GPG=$real_gpg
+    RPM_CONFIGDIR=$PWD/.container/rpm-config
+    PATH=$PWD/.container/repro-bin:$PATH
+    export REAL_GPG RPM_CONFIGDIR PATH
+fi
+for architecture in amd64 arm64 riscv64; do
     case $architecture in
         amd64) target=x86_64-unknown-linux-musl ;;
         arm64) target=aarch64-unknown-linux-musl ;;
+        riscv64) target=riscv64gc-unknown-linux-musl ;;
     esac
 
-    mise exec -- cargo zigbuild \
+    cargo zigbuild \
         --package tesor \
         --bin tesor \
         --release \
@@ -125,68 +183,17 @@ for architecture in amd64 arm64; do
     install -Dm0755 "target/$target/release/tesor" "$container_binary"
     install -Dm0755 "$container_binary" target/release/tesor
     mise run package -- \
+        --config deploy/nfpm.yaml \
         --version "$package_version" \
         --arch "$architecture" \
         --output dist \
-        deb rpm
+        deb rpm apk
 done
 
 install -Dm0755 .container/binary-amd64/tesor target/release/tesor
 ./tests/smoke/run-local.sh
 
-# Nightly release and package repositories
-if [ "${GITHUB_EVENT_NAME:-}" = push ] && [ "${GITHUB_REF:-}" = refs/heads/main ]; then
-    release_tag=nightly
-    if mise exec -- gh api \
-        "repos/$GITHUB_REPOSITORY/git/ref/tags/$release_tag" >/dev/null 2>&1; then
-        mise exec -- gh api --method PATCH \
-            "repos/$GITHUB_REPOSITORY/git/refs/tags/$release_tag" \
-            -f "sha=$revision" -F force=true >/dev/null
-    else
-        mise exec -- gh api --method POST \
-            "repos/$GITHUB_REPOSITORY/git/refs" \
-            -f "ref=refs/tags/$release_tag" -f "sha=$revision" >/dev/null
-    fi
-
-    if mise exec -- gh release view "$release_tag" \
-        --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-        for asset in $(mise exec -- gh release view "$release_tag" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json assets --jq '.assets[].name'); do
-            mise exec -- gh release delete-asset "$release_tag" "$asset" \
-                --repo "$GITHUB_REPOSITORY" --yes
-        done
-        mise exec -- gh release edit "$release_tag" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$release_tag" \
-            --notes "Last successful build from \`main\` branch.
-
-**Release checks**: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-    else
-        mise exec -- gh release create "$release_tag" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$release_tag" \
-            --notes "Last successful build from \`main\` branch.
-
-**Release checks**: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-    fi
-    mise exec -- gh release upload "$release_tag" dist/* \
-        --repo "$GITHUB_REPOSITORY"
-
-    mise run publish -- \
-        --service tesor \
-        --channel nightly \
-        --input dist \
-        deb rpm
-fi
-
-# OCI image and chart
-repository_owner=$(printf '%s' "${GITHUB_REPOSITORY_OWNER:-dimidiumlabs}" |
-    tr '[:upper:]' '[:lower:]')
-repository=${GITHUB_REPOSITORY:-dimidiumlabs/tesor}
-server_url=${GITHUB_SERVER_URL:-https://github.com}
-image="ghcr.io/$repository_owner/tesor"
-
+# Container checks
 builder=$(docker buildx create --driver docker-container --use)
 cleanup_builder() {
     docker buildx rm "$builder" >/dev/null 2>&1 || true
@@ -194,41 +201,128 @@ cleanup_builder() {
 trap cleanup_builder 0
 docker buildx inspect --bootstrap
 
-build_image() {
-    mise run container -- \
-        --context . \
-        --file Dockerfile \
-        --platform linux/amd64,linux/arm64 \
-        --cache-scope tesor \
-        --tag "$image:sha-$revision" \
-        --tag "$image:$artifact_version" \
-        --label "org.opencontainers.image.revision=$revision" \
-        --label "org.opencontainers.image.source=$server_url/$repository" \
-        --label "org.opencontainers.image.version=$artifact_version" \
-        "$@"
-}
+mise run container -- \
+    --file deploy/Dockerfile \
+    --tag tesor:ci \
+    --build-arg VERSION=ci \
+    --build-arg "REVISION=$revision" \
+    --provenance false \
+    --sbom false \
+    --load
+docker run --rm tesor:ci --help >/dev/null
 
-publish_chart() {
-    mise run chart -- \
-        --chart charts/tesor \
-        --version "$artifact_version" \
-        --app-version "$artifact_version" \
-        "$@"
-}
+[ "${GITHUB_EVENT_NAME:-}" = push ] || exit 0
 
-if [ "${GITHUB_EVENT_NAME:-}" = push ]; then
-    mise exec -- gh auth token |
-        docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-    mise exec -- gh auth token | mise exec -- helm registry login ghcr.io \
-        --username "$GITHUB_ACTOR" --password-stdin
+repository_owner=$(printf '%s' "${GITHUB_REPOSITORY_OWNER:-dimidiumlabs}" |
+    tr '[:upper:]' '[:lower:]')
+repository=$GITHUB_REPOSITORY
+server_url=${GITHUB_SERVER_URL:-https://github.com}
+image="ghcr.io/$repository_owner/tesor"
+image_version=$(printf '%s' "$version" | tr + _)
 
-    case ${GITHUB_REF:-} in
-        refs/heads/main) build_image --tag "$image:nightly" --push ;;
-        refs/tags/v*) build_image --tag "$image:latest" --push ;;
-        *) build_image --push ;;
-    esac
-    publish_chart --push "oci://ghcr.io/$repository_owner/charts"
+gh auth token |
+    docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+gh auth token | helm registry login ghcr.io \
+    --username "$GITHUB_ACTOR" --password-stdin
+
+# Publish immutable OCI artifacts before changing mutable release aliases.
+mise run container -- \
+    --file deploy/Dockerfile \
+    --platform linux/amd64,linux/arm64,linux/riscv64 \
+    --cache-scope tesor \
+    --tag "$image:sha-$revision" \
+    --tag "$image:$image_version" \
+    --label "org.opencontainers.image.revision=$revision" \
+    --label "org.opencontainers.image.source=$server_url/$repository" \
+    --label "org.opencontainers.image.version=$version" \
+    --build-arg "VERSION=$version" \
+    --build-arg "REVISION=$revision" \
+    --push
+mise run chart -- \
+    --chart deploy/charts/tesor \
+    --version "$version" \
+    --app-version "$version" \
+    --push "oci://ghcr.io/$repository_owner/charts"
+
+# Publication validates signing keys before updating the package repository.
+mise run publish -- \
+    --service tesor \
+    --channel "$channel" \
+    --input dist \
+    deb rpm apk
+
+nightly_ref_existed=false
+if [ "$channel" = nightly ]; then
+    if gh api \
+        "repos/$GITHUB_REPOSITORY/git/ref/tags/$release_tag" >/dev/null 2>&1; then
+        nightly_ref_existed=true
+    fi
+    release_notes="Last successful build from \`main\` branch.
+
+**Version**: $version
+
+**Release checks**: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 else
-    build_image
-    publish_chart
+    release_notes="Release $version.
+
+**Release checks**: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+fi
+
+if gh release view "$release_tag" \
+    --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+    for asset in $(gh release view "$release_tag" \
+        --repo "$GITHUB_REPOSITORY" \
+        --json assets --jq '.assets[].name'); do
+        gh release delete-asset "$release_tag" "$asset" \
+            --repo "$GITHUB_REPOSITORY" --yes
+    done
+    if [ "$channel" = nightly ]; then
+        gh release edit "$release_tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$release_name" \
+            --prerelease \
+            --notes "$release_notes"
+    else
+        gh release edit "$release_tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$release_name" \
+            --notes "$release_notes"
+    fi
+elif [ "$channel" = nightly ]; then
+    gh release create "$release_tag" \
+        --repo "$GITHUB_REPOSITORY" \
+        --target "$revision" \
+        --title "$release_name" \
+        --prerelease \
+        --notes "$release_notes"
+else
+    gh release create "$release_tag" \
+        --repo "$GITHUB_REPOSITORY" \
+        --title "$release_name" \
+        --verify-tag \
+        --notes "$release_notes"
+fi
+gh release upload "$release_tag" \
+    dist/*.apk dist/*.deb dist/*.rpm \
+    --repo "$GITHUB_REPOSITORY"
+
+case $channel in
+    nightly) mutable_image_tag=nightly ;;
+    stable) mutable_image_tag=latest ;;
+esac
+docker buildx imagetools create \
+    --tag "$image:$mutable_image_tag" "$image:$image_version"
+
+# The mutable nightly ref is the final success marker for the whole release.
+if [ "$channel" = nightly ]; then
+    if [ "$nightly_ref_existed" = true ]; then
+        gh api --method PATCH \
+            "repos/$GITHUB_REPOSITORY/git/refs/tags/$release_tag" \
+            -f "sha=$revision" -F force=true >/dev/null
+    elif ! gh api \
+        "repos/$GITHUB_REPOSITORY/git/ref/tags/$release_tag" >/dev/null 2>&1; then
+        gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$release_tag" -f "sha=$revision" >/dev/null
+    fi
 fi

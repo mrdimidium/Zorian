@@ -13,7 +13,7 @@ experimental = true
 gh = "2.96.0"
 helm = "4.1.1"
 jq = "1.8.2"
-rust = { version = "1.97.1", profile = "minimal", components = [ "clippy", "llvm-tools-preview", "rustfmt" ], targets = [ "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl" ] }
+rust = { version = "1.97.1", profile = "minimal", components = [ "clippy", "llvm-tools-preview", "rustfmt" ], targets = [ "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "riscv64gc-unknown-linux-musl" ] }
 shellcheck = "0.11.0"
 zig = "0.15.2"
 

@@ -20,6 +20,18 @@ sudo apt update && sudo apt install tesor
 sudo systemctl enable --now tesor
 ```
 
+**Alpine:**
+
+```bash
+sudo wget -q https://pkg.dimidiumlabs.io/keys/packages.0001.rsa.pub \
+  -O /etc/apk/keys/packages.0001.rsa.pub
+echo "https://pkg.dimidiumlabs.io/tesor/apk/nightly/$(apk --print-arch)" | \
+  sudo tee -a /etc/apk/repositories
+sudo apk update && sudo apk add tesor
+sudo rc-update add tesor default
+sudo rc-service tesor start
+```
+
 **Fedora/RHEL:**
 
 ```bash
@@ -44,6 +56,11 @@ sudo zypper install tesor
 sudo systemctl enable --now tesor
 ```
 
+The examples use the `nightly` channel updated from `main`. Replace `nightly`
+with `stable` to follow packages published from matching `v*` release tags.
+Signed APK, DEB, and RPM packages and the `ghcr.io/dimidiumlabs/tesor` image
+are published for AMD64, ARM64, and RISC-V 64.
+
 ## Build from source
 
 1. Clone repo: `git clone https://git.dimidiumlabs.io/tesor.git && cd tesor`
@@ -54,8 +71,8 @@ sudo systemctl enable --now tesor
     ```bash
     sudo groupadd --system tesor
     sudo useradd --system --gid tesor --no-create-home --shell /usr/sbin/nologin tesor
-    sudo install -m 700 -o tesor ./pkg/tesor.toml     /etc/
-    sudo install -m 755 -o root   ./pkg/tesor.service  /usr/lib/systemd/system
+    sudo install -m 700 -o tesor ./deploy/tesor.toml     /etc/
+    sudo install -m 755 -o root   ./deploy/tesor.service  /usr/lib/systemd/system
     sudo install -m 755 -o root   target/release/tesor /usr/local/bin/
     ```
 

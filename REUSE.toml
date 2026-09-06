@@ -9,8 +9,8 @@ path = [
   "Cargo.lock",
   "mise.lock",
 
-  "pkg/*.svg",
-  "charts/tesor/templates/*",
+  "deploy/*.svg",
+  "deploy/charts/tesor/templates/*",
 
   "crates/tesor/src/assets/*.svg",
   "crates/tesor/src/assets/*.ico",

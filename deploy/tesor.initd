@@ -1,0 +1,26 @@
+#!/sbin/openrc-run
+# shellcheck shell=sh disable=SC2034
+# SPDX-FileCopyrightText: 2026 Nikolay Govorov
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+description="Tesor server (tiny packages caching proxy)"
+
+command="/usr/local/bin/tesor"
+command_args="--config=/etc/tesor.toml"
+command_user="tesor:tesor"
+
+supervisor="supervise-daemon"
+respawn_delay=30
+output_log="/var/log/tesor/out.log"
+error_log="/var/log/tesor/err.log"
+
+depend() {
+	need net
+	after firewall
+}
+
+start_pre() {
+	checkpath -d -o tesor:tesor -m 0750 /var/log/tesor
+	checkpath -d -o tesor:tesor -m 0755 /var/lib/tesor
+	checkpath -d -o tesor:tesor -m 0750 /run/tesor
+}

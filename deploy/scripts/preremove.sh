@@ -8,3 +8,8 @@ if [ -x "/bin/systemctl" ] && [ -d /run/systemd/system ] && [ -f /usr/lib/system
   /bin/systemctl stop tesor.service || true
   /bin/systemctl disable tesor.service || true
 fi
+
+if command -v rc-service >/dev/null && [ -f /etc/init.d/tesor ]; then
+  rc-service tesor stop || true
+  rc-update del tesor || true
+fi

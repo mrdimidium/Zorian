@@ -8,3 +8,7 @@ if [ -x "/bin/systemctl" ] && [ -d /run/systemd/system ] && [ -f /usr/lib/system
   /bin/systemctl daemon-reload
   /bin/systemctl enable tesor
 fi
+
+if command -v rc-update >/dev/null && [ -f /etc/init.d/tesor ]; then
+  rc-update add tesor default
+fi

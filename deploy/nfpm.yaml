@@ -9,6 +9,8 @@ arch: ${ARCH}
 version: ${VERSION}
 license: AGPL-3.0-or-later
 platform: linux
+# Keep package payloads reproducible across retries of the same release.
+mtime: 1970-01-01T00:00:00Z
 maintainer: Nikolay Govorov <me@govorov.online>
 description: Tiny packages caching proxy
 
@@ -23,7 +25,7 @@ contents:
     file_info:
       mode: 0755
 
-  - src: pkg/tesor.toml
+  - src: deploy/tesor.toml
     dst: /etc/tesor.toml
     type: config|noreplace
     file_info:
@@ -31,10 +33,21 @@ contents:
       owner: root
       group: tesor
 
-  - src: pkg/tesor.service
+  - src: deploy/tesor.service
     dst: /usr/lib/systemd/system/tesor.service
+    packager: deb
     file_info:
       mode: 0644
+  - src: deploy/tesor.service
+    dst: /usr/lib/systemd/system/tesor.service
+    packager: rpm
+    file_info:
+      mode: 0644
+  - src: deploy/tesor.initd
+    dst: /etc/init.d/tesor
+    packager: apk
+    file_info:
+      mode: 0755
 
   - dst: /var/lib/tesor
     type: dir
@@ -45,9 +58,9 @@ contents:
 
 
 scripts:
-  preinstall: pkg/scripts/preinstall.sh
-  postinstall: pkg/scripts/postinstall.sh
-  preremove: pkg/scripts/preremove.sh
+  preinstall: deploy/scripts/preinstall.sh
+  postinstall: deploy/scripts/postinstall.sh
+  preremove: deploy/scripts/preremove.sh
 
 deb:
   signature:
@@ -60,3 +73,10 @@ rpm:
   signature:
     key_id: ${GPG_KEY_ID}
     key_file: ${SIGNING_PRIVATE_KEY}
+
+apk:
+  signature:
+    key_file: ${APK_SIGNING_KEY}
+    # nFPM appends ".rsa.pub". Keep the generation in the basename so clients
+    # can retain historical package keys during signing-key rotation.
+    key_name: packages.${PACKAGE_KEY_VERSION}

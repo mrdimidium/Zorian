@@ -12,17 +12,23 @@ RUN install -d -m 0750 /rootfs/var/lib/tesor
 FROM gcr.io/distroless/cc-debian13:nonroot@${DISTROLESS_DIGEST}
 
 ARG TARGETARCH
+ARG VERSION=dev
+ARG REVISION=unknown
 
-LABEL org.opencontainers.image.source="https://git.dimidiumlabs.io/tesor" \
+LABEL org.opencontainers.image.title="Tesor" \
+      org.opencontainers.image.description="Tiny packages caching proxy" \
+      org.opencontainers.image.source="https://git.dimidiumlabs.io/tesor" \
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.revision="$REVISION" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later"
 
 COPY --chown=root:root --chmod=0755 .container/binary-${TARGETARCH}/tesor /usr/local/bin/tesor
 COPY --from=rootfs --chown=10000:10000 /rootfs/var/lib/tesor /var/lib/tesor
-COPY --chown=root:root pkg/tesor.toml /etc/tesor.toml
+COPY --chown=root:root deploy/tesor.toml /etc/tesor.toml
 COPY --chown=root:root LICENSE README.md /usr/share/doc/tesor/
 
 USER 10000:10000
-EXPOSE 2000
+EXPOSE 2025
 VOLUME ["/var/lib/tesor"]
 
 ENTRYPOINT ["/usr/local/bin/tesor"]
